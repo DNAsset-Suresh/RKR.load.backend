@@ -101,6 +101,74 @@ app.post('/api/transactions', async (req, res) => {
   res.json({ data: newTx });
 });
 
+app.post('/api/transactions/bulk', async (req, res) => {
+  try {
+    const { loads } = req.body;
+    if (!Array.isArray(loads) || loads.length === 0) {
+      return res.status(400).json({ error: 'No loads provided' });
+    }
+
+    const settings = await getSettings();
+    const dates = [...new Set(loads.map(l => l.date))];
+    const vehicleNumbers = [...new Set(loads.map(l => l.vehicleNumber))];
+
+    // Find existing to prevent duplicates
+    const existingTxs = await prisma.transaction.findMany({
+      where: {
+        date: { in: dates },
+        vehicleNumber: { in: vehicleNumbers }
+      },
+      select: { date: true, vehicleNumber: true, weightKg: true }
+    });
+
+    const existingSet = new Set(
+      existingTxs.map(t => `${t.date}_${t.vehicleNumber}_${t.weightKg}`)
+    );
+
+    const validRows = [];
+    const duplicateRows = [];
+
+    for (const load of loads) {
+      const key = `${load.date}_${load.vehicleNumber}_${load.weightKg}`;
+      if (existingSet.has(key)) {
+        duplicateRows.push(load);
+      } else {
+        const weightTons = load.weightKg / 1000;
+        validRows.push({
+          date: load.date,
+          vehicleNumber: load.vehicleNumber,
+          weightKg: load.weightKg,
+          weightTons,
+          customerTotalAmount: weightTons * settings.customerRatePerTon,
+          companyTotalAmount: weightTons * settings.companyRatePerTon,
+          rkrProfit: weightTons * settings.rkrProfitPerTon,
+          rkrProfitPerTon: settings.rkrProfitPerTon
+        });
+      }
+    }
+
+    if (validRows.length > 0) {
+      await prisma.transaction.createMany({
+        data: validRows
+      });
+    }
+
+    res.json({
+      data: {
+        totalRows: loads.length,
+        validRows: validRows.length,
+        uploadedRows: validRows.length,
+        invalidRows: 0, // frontend handles invalid formats
+        duplicateRows: duplicateRows.length,
+        failedRows: 0
+      }
+    });
+  } catch (err) {
+    console.error("BULK UPLOAD ERROR:", err);
+    res.status(500).json({ error: String(err), message: err.message });
+  }
+});
+
 // Dashboard (Basic version)
 app.get('/api/dashboard', async (req, res) => {
   try {
