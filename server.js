@@ -143,7 +143,11 @@ app.get('/api/invoices', (req, res) => res.json({ data: [], total: 0 }));
 app.get('/api/invoices/:id', (req, res) => res.json({ data: { id: req.params.id, amount: 0, status: 'Draft' } }));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-const PORT = 8000;
-app.listen(PORT, () => {
-  console.log(`RKR Backend (Supabase) running on http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = 8000;
+  app.listen(PORT, () => {
+    console.log(`RKR Backend (Supabase) running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

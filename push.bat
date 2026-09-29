@@ -1,0 +1,6 @@
+@echo off
+echo Pushing backend code to GitHub...
+git push -u origin main
+echo.
+echo Done! Press any key to close...
+pause
