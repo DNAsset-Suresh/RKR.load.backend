@@ -204,13 +204,83 @@ app.get('/api/dashboard', async (req, res) => {
   }
 });
 
-// Mock remaining for now
-const mockReports = (req, res) => res.json({ data: { loadCount: 0, totalWeightTons: 0, rkrProfit: 0, items: [] } });
-app.get('/api/reports/daily', mockReports);
-app.get('/api/reports/weekly', mockReports);
-app.get('/api/reports/monthly', mockReports);
-app.get('/api/reports/overall', mockReports);
-app.get('/api/reports/vehicles', (req, res) => res.json({ data: [] }));
+async function getReport(req, res) {
+  try {
+    const { from, to } = req.query;
+    let where = {};
+    if (from || to) {
+      where.date = {};
+      if (from) where.date.gte = from;
+      if (to) where.date.lte = to;
+    }
+    
+    const settings = await getSettings();
+    const txs = await prisma.transaction.findMany({ where });
+    
+    const totals = {
+      loadCount: txs.length,
+      totalWeightKg: txs.reduce((a, b) => a + b.weightKg, 0),
+      totalWeightTons: txs.reduce((a, b) => a + b.weightTons, 0),
+      customerTotalAmount: txs.reduce((a, b) => a + b.customerTotalAmount, 0),
+      companyTotalAmount: txs.reduce((a, b) => a + b.companyTotalAmount, 0),
+      rkrProfit: txs.reduce((a, b) => a + b.rkrProfit, 0),
+      rkrProfitPerTon: settings.rkrProfitPerTon
+    };
+
+    res.json({
+      data: {
+        range: { from: from || null, to: to || null },
+        totals,
+        items: txs
+      }
+    });
+  } catch(err) {
+    res.status(500).json({ error: String(err) });
+  }
+}
+
+app.get('/api/reports/daily', getReport);
+app.get('/api/reports/weekly', getReport);
+app.get('/api/reports/monthly', getReport);
+app.get('/api/reports/overall', getReport);
+
+app.get('/api/reports/vehicles', async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    let where = {};
+    if (from || to) {
+      where.date = {};
+      if (from) where.date.gte = from;
+      if (to) where.date.lte = to;
+    }
+    
+    const txs = await prisma.transaction.findMany({ where });
+    
+    const vMap = {};
+    for (const t of txs) {
+      const v = t.vehicleNumber;
+      if (!vMap[v]) vMap[v] = { vehicleNumber: v, loadCount: 0, totalWeightKg: 0, totalWeightTons: 0, customerTotalAmount: 0, companyTotalAmount: 0, rkrProfit: 0 };
+      
+      vMap[v].loadCount += 1;
+      vMap[v].totalWeightKg += t.weightKg;
+      vMap[v].totalWeightTons += t.weightTons;
+      vMap[v].customerTotalAmount += t.customerTotalAmount;
+      vMap[v].companyTotalAmount += t.companyTotalAmount;
+      vMap[v].rkrProfit += t.rkrProfit;
+    }
+    
+    const vehicles = Object.values(vMap).sort((a,b) => b.loadCount - a.loadCount);
+    
+    res.json({
+      data: {
+        vehicleCount: vehicles.length,
+        vehicles
+      }
+    });
+  } catch(err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 app.get('/api/invoices', (req, res) => res.json({ data: [], total: 0 }));
 app.get('/api/invoices/:id', (req, res) => res.json({ data: { id: req.params.id, amount: 0, status: 'Draft' } }));
