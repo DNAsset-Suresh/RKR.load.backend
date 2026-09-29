@@ -216,6 +216,23 @@ app.get('/api/invoices', (req, res) => res.json({ data: [], total: 0 }));
 app.get('/api/invoices/:id', (req, res) => res.json({ data: { id: req.params.id, amount: 0, status: 'Draft' } }));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
+app.get('/api/export/excel', async (req, res) => {
+  try {
+    const txs = await prisma.transaction.findMany({ orderBy: { date: 'desc' } });
+    
+    let csv = 'Date,Vehicle Number,Weight KG,Weight Tons,Customer Total,Company Total,RKR Profit\n';
+    txs.forEach(t => {
+      csv += `${t.date},${t.vehicleNumber},${t.weightKg},${t.weightTons},${t.customerTotalAmount},${t.companyTotalAmount},${t.rkrProfit}\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="RKR-Transactions.csv"');
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 if (process.env.NODE_ENV !== 'production') {
   const PORT = 8000;
   app.listen(PORT, () => {
