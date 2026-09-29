@@ -101,6 +101,39 @@ app.post('/api/transactions', async (req, res) => {
   res.json({ data: newTx });
 });
 
+app.put('/api/transactions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date, vehicleNumber, weightKg } = req.body;
+    const settings = await getSettings();
+    const weightTons = weightKg / 1000;
+    
+    const updated = await prisma.transaction.update({
+      where: { id },
+      data: {
+        date, vehicleNumber, weightKg, weightTons,
+        customerTotalAmount: weightTons * settings.customerRatePerTon,
+        companyTotalAmount: weightTons * settings.companyRatePerTon,
+        rkrProfit: weightTons * settings.rkrProfitPerTon,
+        rkrProfitPerTon: settings.rkrProfitPerTon
+      }
+    });
+    res.json({ data: updated });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.delete('/api/transactions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await prisma.transaction.delete({ where: { id } });
+    res.json({ message: 'Deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post('/api/transactions/bulk', async (req, res) => {
   try {
     const { loads } = req.body;
