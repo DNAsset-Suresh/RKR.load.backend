@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
 require('dotenv').config();
@@ -103,32 +103,37 @@ app.post('/api/transactions', async (req, res) => {
 
 // Dashboard (Basic version)
 app.get('/api/dashboard', async (req, res) => {
-  const settings = await getSettings();
-  const txs = await prisma.transaction.findMany();
-  
-  const sum = (arr) => ({
-    loadCount: arr.length,
-    totalWeightKg: arr.reduce((acc, t) => acc + t.weightKg, 0),
-    totalWeightTons: arr.reduce((acc, t) => acc + t.weightTons, 0),
-    customerTotalAmount: arr.reduce((acc, t) => acc + t.customerTotalAmount, 0),
-    companyTotalAmount: arr.reduce((acc, t) => acc + t.companyTotalAmount, 0),
-    rkrProfit: arr.reduce((acc, t) => acc + t.rkrProfit, 0),
-    customerRatePerTon: settings.customerRatePerTon,
-    companyRatePerTon: settings.companyRatePerTon,
-    customerGstRate: settings.customerGstRate,
-    companyGstRate: settings.companyGstRate
-  });
+  try {
+    const settings = await getSettings();
+    const txs = await prisma.transaction.findMany();
+    
+    const sum = (arr) => ({
+      loadCount: arr.length,
+      totalWeightKg: arr.reduce((acc, t) => acc + t.weightKg, 0),
+      totalWeightTons: arr.reduce((acc, t) => acc + t.weightTons, 0),
+      customerTotalAmount: arr.reduce((acc, t) => acc + t.customerTotalAmount, 0),
+      companyTotalAmount: arr.reduce((acc, t) => acc + t.companyTotalAmount, 0),
+      rkrProfit: arr.reduce((acc, t) => acc + t.rkrProfit, 0),
+      customerRatePerTon: settings.customerRatePerTon,
+      companyRatePerTon: settings.companyRatePerTon,
+      customerGstRate: settings.customerGstRate,
+      companyGstRate: settings.companyGstRate
+    });
 
-  const totals = sum(txs);
-  res.json({
-    data: {
-      range: { label: 'All Time', from: null, to: null },
-      cards: { selected: totals, today: totals, week: totals, month: totals, overall: totals },
-      rates: settings,
-      capacity: settings.capacity,
-      chart: []
-    }
-  });
+    const totals = sum(txs);
+    res.json({
+      data: {
+        range: { label: 'All Time', from: null, to: null },
+        cards: { selected: totals, today: totals, week: totals, month: totals, overall: totals },
+        rates: settings,
+        capacity: settings.capacity,
+        chart: []
+      }
+    });
+  } catch (err) {
+    console.error("DASHBOARD ERROR:", err);
+    res.status(500).json({ error: String(err), message: err.message, stack: err.stack });
+  }
 });
 
 // Mock remaining for now
