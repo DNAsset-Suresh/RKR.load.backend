@@ -68,8 +68,21 @@ function normalizeMaterial(m) {
   return '40mm';
 }
 
+// In-memory cache for settings & capacities to drastically reduce DB queries (<1ms responses)
+let cachedSettings = null;
+let cachedSettingsTime = 0;
+const SETTINGS_CACHE_TTL_MS = 30000; // 30 seconds
+
+function invalidateSettingsCache() {
+  cachedSettings = null;
+  cachedSettingsTime = 0;
+}
+
 // Helper to get typed settings with independent rate cards for 40mm and Dust
-async function getSettings() {
+async function getSettings(force = false) {
+  if (!force && cachedSettings && (Date.now() - cachedSettingsTime < SETTINGS_CACHE_TTL_MS)) {
+    return cachedSettings;
+  }
   const settingsArray = await prisma.setting.findMany();
   let raw = {};
   for (const s of settingsArray) {
@@ -154,7 +167,7 @@ async function getSettings() {
     }
   };
 
-  return {
+  cachedSettings = {
     ...card40mm, // default / backward compatible
     materials: {
       '40mm': card40mm,
@@ -174,6 +187,8 @@ async function getSettings() {
       maximumLoads: max40mm + maxDust
     }
   };
+  cachedSettingsTime = Date.now();
+  return cachedSettings;
 }
 
 // Build where clause from query parameters, including material
@@ -224,7 +239,8 @@ app.put('/api/settings', async (req, res) => {
         });
       }
     }
-    res.json({ message: 'Settings updated successfully', data: await getSettings() });
+    invalidateSettingsCache();
+    res.json({ message: 'Settings updated successfully', data: await getSettings(true) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -312,6 +328,7 @@ app.post('/api/transactions', async (req, res) => {
       }
     });
 
+    invalidateSettingsCache();
     res.json({ data: enrichTransaction(newTx, settings) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -342,6 +359,7 @@ app.put('/api/transactions/:id', async (req, res) => {
       }
     });
 
+    invalidateSettingsCache();
     res.json({ data: enrichTransaction(updated, settings) });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -353,6 +371,7 @@ app.delete('/api/transactions/:id', async (req, res) => {
   try {
     const { id } = req.params;
     await prisma.transaction.delete({ where: { id } });
+    invalidateSettingsCache();
     res.json({ message: 'Deleted successfully' });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -415,6 +434,7 @@ app.post('/api/transactions/bulk', async (req, res) => {
       await prisma.transaction.createMany({
         data: validRows
       });
+      invalidateSettingsCache();
     }
 
     res.json({
