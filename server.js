@@ -6,8 +6,10 @@ require('dotenv').config();
 const {
   money,
   toTons,
+  getMaterialRates,
   calcTransaction,
   calcAggregate,
+  calcRowsAggregate,
   enrichTransaction,
 } = require('./calc');
 
@@ -59,45 +61,107 @@ function getMonthStartISO(isoDate) {
   return base.slice(0, 7) + '-01';
 }
 
-// Helper to get typed settings
+function normalizeMaterial(m) {
+  if (!m) return '40mm';
+  const str = String(m).trim().toLowerCase();
+  if (str === 'dust') return 'Dust';
+  return '40mm';
+}
+
+// Helper to get typed settings with independent rate cards for 40mm and Dust
 async function getSettings() {
   const settingsArray = await prisma.setting.findMany();
   let raw = {};
-  if (settingsArray.length === 0) {
-    raw = {
-      customerRatePerTon: '930',
-      companyRatePerTon: '920',
-      rkrProfitPerTon: '10',
-      customerGstRate: '5',
-      companyGstRate: '5',
-      maximumLoads: '10000',
-      businessName: 'RKR ENTERPRISES',
-      businessTagline: 'PLANNING | SOLUTIONS | GROWTH',
-      businessAddress: 'Chennai, TN',
-      businessPhone: '9876543210',
-      businessEmail: 'info@rkrenterprises.com',
-      invoicePrefix: 'RKR-'
-    };
-    for (const [key, value] of Object.entries(raw)) {
-      await prisma.setting.create({ data: { key, value } });
-    }
-  } else {
-    for (const s of settingsArray) {
-      raw[s.key] = s.value;
+  for (const s of settingsArray) {
+    raw[s.key] = s.value;
+  }
+
+  // Ensure default values for both 40mm and Dust rate cards without overwriting existing
+  const defaults = {
+    customerRatePerTon: '930',
+    companyRatePerTon: '920',
+    rkrProfitPerTon: '10',
+    customerGstRate: '5',
+    companyGstRate: '5',
+    maximumLoads: '10000',
+    dust_customerRatePerTon: '810',
+    dust_companyRatePerTon: '800',
+    dust_rkrProfitPerTon: '10',
+    dust_customerGstRate: '5',
+    dust_companyGstRate: '5',
+    dust_maximumLoads: '10000',
+    businessName: 'RKR ENTERPRISES',
+    businessTagline: 'PLANNING | SOLUTIONS | GROWTH',
+    businessAddress: 'Chennai, TN',
+    businessPhone: '9876543210',
+    businessEmail: 'info@rkrenterprises.com',
+    invoicePrefix: 'RKR-'
+  };
+
+  for (const [key, val] of Object.entries(defaults)) {
+    if (raw[key] === undefined) {
+      raw[key] = val;
+      await prisma.setting.upsert({
+        where: { key },
+        update: { value: val },
+        create: { key, value: val }
+      });
     }
   }
 
   const num = (k, def = 0) => (raw[k] !== undefined ? Number(raw[k]) : def);
-  const loadCount = await prisma.transaction.count();
-  const maximumLoads = num('maximumLoads', 10000);
 
-  return {
+  const count40mm = await prisma.transaction.count({
+    where: { material: '40mm' }
+  });
+  const countDust = await prisma.transaction.count({
+    where: { material: 'Dust' }
+  });
+  const totalLoads = count40mm + countDust;
+
+  const max40mm = num('maximumLoads', 10000);
+  const maxDust = num('dust_maximumLoads', 10000);
+
+  const card40mm = {
+    name: '40mm',
+    material: '40mm',
     customerRatePerTon: num('customerRatePerTon', 930),
     companyRatePerTon: num('companyRatePerTon', 920),
     rkrProfitPerTon: num('rkrProfitPerTon', 10),
     customerGstRate: num('customerGstRate', 5),
     companyGstRate: num('companyGstRate', 5),
-    maximumLoads: maximumLoads,
+    maximumLoads: max40mm,
+    capacity: {
+      used: count40mm,
+      remaining: Math.max(0, max40mm - count40mm),
+      maximumLoads: max40mm
+    }
+  };
+
+  const cardDust = {
+    name: 'Dust',
+    material: 'Dust',
+    customerRatePerTon: raw.dust_customerRatePerTon !== undefined ? Number(raw.dust_customerRatePerTon) : (raw.dustCustomerRatePerTon !== undefined ? Number(raw.dustCustomerRatePerTon) : 810),
+    companyRatePerTon: raw.dust_companyRatePerTon !== undefined ? Number(raw.dust_companyRatePerTon) : (raw.dustCompanyRatePerTon !== undefined ? Number(raw.dustCompanyRatePerTon) : 800),
+    rkrProfitPerTon: raw.dust_rkrProfitPerTon !== undefined ? Number(raw.dust_rkrProfitPerTon) : (raw.dustRkrProfitPerTon !== undefined ? Number(raw.dustRkrProfitPerTon) : 10),
+    customerGstRate: raw.dust_customerGstRate !== undefined ? Number(raw.dust_customerGstRate) : (raw.dustCustomerGstRate !== undefined ? Number(raw.dustCustomerGstRate) : 5),
+    companyGstRate: raw.dust_companyGstRate !== undefined ? Number(raw.dust_companyGstRate) : (raw.dustCompanyGstRate !== undefined ? Number(raw.dustCompanyGstRate) : 5),
+    maximumLoads: maxDust,
+    capacity: {
+      used: countDust,
+      remaining: Math.max(0, maxDust - countDust),
+      maximumLoads: maxDust
+    }
+  };
+
+  return {
+    ...card40mm, // default / backward compatible
+    materials: {
+      '40mm': card40mm,
+      'Dust': cardDust
+    },
+    '40mm': card40mm,
+    'Dust': cardDust,
     businessName: raw.businessName || 'RKR ENTERPRISES',
     businessTagline: raw.businessTagline || 'Logistics',
     businessAddress: raw.businessAddress || 'Chennai, TN',
@@ -105,16 +169,16 @@ async function getSettings() {
     businessEmail: raw.businessEmail || 'info@rkrenterprises.com',
     invoicePrefix: raw.invoicePrefix || 'RKR-',
     capacity: {
-      used: loadCount,
-      remaining: Math.max(0, maximumLoads - loadCount),
-      maximumLoads: maximumLoads
+      used: totalLoads,
+      remaining: Math.max(0, (max40mm + maxDust) - totalLoads),
+      maximumLoads: max40mm + maxDust
     }
   };
 }
 
-// Build where clause from query parameters
+// Build where clause from query parameters, including material
 function buildWhereClause(query) {
-  const { from, to, vehicle, date } = query;
+  const { from, to, vehicle, date, material } = query;
   let where = {};
 
   if (date) {
@@ -132,6 +196,11 @@ function buildWhereClause(query) {
     };
   }
 
+  if (material && material !== 'All' && material !== 'all') {
+    const mat = normalizeMaterial(material);
+    where.material = mat;
+  }
+
   return where;
 }
 
@@ -147,11 +216,13 @@ app.get('/api/settings', async (req, res) => {
 app.put('/api/settings', async (req, res) => {
   try {
     for (const [key, value] of Object.entries(req.body)) {
-      await prisma.setting.upsert({
-        where: { key },
-        update: { value: String(value) },
-        create: { key, value: String(value) }
-      });
+      if (value !== undefined && value !== null) {
+        await prisma.setting.upsert({
+          where: { key },
+          update: { value: String(value) },
+          create: { key, value: String(value) }
+        });
+      }
     }
     res.json({ message: 'Settings updated successfully', data: await getSettings() });
   } catch (err) {
@@ -159,19 +230,19 @@ app.put('/api/settings', async (req, res) => {
   }
 });
 
-// Transactions Preview
+// Transactions Preview (Material-aware)
 app.post('/api/transactions/preview', async (req, res) => {
   try {
-    const { weightKg } = req.body;
+    const { weightKg, material } = req.body;
     const settings = await getSettings();
-    const result = calcTransaction(weightKg, settings);
+    const result = calcTransaction(weightKg, settings, material || '40mm');
     res.json({ data: result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
 });
 
-// Transactions List
+// Transactions List (Material-aware)
 app.get('/api/transactions', async (req, res) => {
   try {
     const settings = await getSettings();
@@ -180,23 +251,22 @@ app.get('/api/transactions', async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const pageSize = Math.max(1, parseInt(req.query.pageSize || req.query.limit, 10) || 50);
 
-    // Get all matching transactions to calculate totals accurately
+    // Get all matching transactions
     const allMatching = await prisma.transaction.findMany({
       where,
       orderBy: [{ date: 'desc' }, { createdAt: 'desc' }]
     });
 
-    const totalCount = allMatching.length;
-    const totalKg = allMatching.reduce((acc, t) => acc + Number(t.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, totalCount, settings);
+    const enrichedAll = allMatching.map(t => enrichTransaction(t, settings));
+    const totalCount = enrichedAll.length;
+    const totals = calcRowsAggregate(enrichedAll, settings, req.query.material);
 
     // Paginate
     const skip = (page - 1) * pageSize;
-    const paginated = allMatching.slice(skip, skip + pageSize);
-    const enrichedRows = paginated.map(t => enrichTransaction(t, settings));
+    const paginated = enrichedAll.slice(skip, skip + pageSize);
 
     res.json({
-      data: enrichedRows,
+      data: paginated,
       total: totalCount,
       meta: {
         page,
@@ -211,17 +281,28 @@ app.get('/api/transactions', async (req, res) => {
   }
 });
 
-// Create Transaction
+// Create Transaction (Material-aware)
 app.post('/api/transactions', async (req, res) => {
   try {
-    const { date, vehicleNumber, weightKg } = req.body;
+    const { date, vehicleNumber, weightKg, material } = req.body;
+    const mat = normalizeMaterial(material);
     const settings = await getSettings();
-    const calc = calcTransaction(weightKg, settings);
+
+    // Check material capacity limit
+    const card = settings.materials[mat];
+    if (card && card.capacity && card.capacity.remaining <= 0) {
+      return res.status(400).json({
+        error: { message: `Maximum load entries reached for ${mat} (${card.maximumLoads}). Export and archive first.` }
+      });
+    }
+
+    const calc = calcTransaction(weightKg, settings, mat);
 
     const newTx = await prisma.transaction.create({
       data: {
         date,
         vehicleNumber: (vehicleNumber || '').trim().toUpperCase(),
+        material: mat,
         weightKg: calc.weightKg,
         weightTons: calc.weightTons,
         customerTotalAmount: calc.customerTotalAmount,
@@ -237,19 +318,21 @@ app.post('/api/transactions', async (req, res) => {
   }
 });
 
-// Update Transaction
+// Update Transaction (Material-aware)
 app.put('/api/transactions/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { date, vehicleNumber, weightKg } = req.body;
+    const { date, vehicleNumber, weightKg, material } = req.body;
+    const mat = normalizeMaterial(material);
     const settings = await getSettings();
-    const calc = calcTransaction(weightKg, settings);
+    const calc = calcTransaction(weightKg, settings, mat);
 
     const updated = await prisma.transaction.update({
       where: { id },
       data: {
         date,
         vehicleNumber: (vehicleNumber || '').trim().toUpperCase(),
+        material: mat,
         weightKg: calc.weightKg,
         weightTons: calc.weightTons,
         customerTotalAmount: calc.customerTotalAmount,
@@ -276,14 +359,15 @@ app.delete('/api/transactions/:id', async (req, res) => {
   }
 });
 
-// Bulk Upload Transactions
+// Bulk Upload Transactions (Material-aware)
 app.post('/api/transactions/bulk', async (req, res) => {
   try {
-    const { loads } = req.body;
+    const { loads, defaultMaterial } = req.body;
     if (!Array.isArray(loads) || loads.length === 0) {
       return res.status(400).json({ error: 'No loads provided' });
     }
 
+    const fallbackMat = normalizeMaterial(defaultMaterial || '40mm');
     const settings = await getSettings();
     const dates = [...new Set(loads.map(l => l.date))];
     const vehicleNumbers = [...new Set(loads.map(l => (l.vehicleNumber || '').trim().toUpperCase()))];
@@ -293,11 +377,11 @@ app.post('/api/transactions/bulk', async (req, res) => {
         date: { in: dates },
         vehicleNumber: { in: vehicleNumbers }
       },
-      select: { date: true, vehicleNumber: true, weightKg: true }
+      select: { date: true, vehicleNumber: true, weightKg: true, material: true }
     });
 
     const existingSet = new Set(
-      existingTxs.map(t => `${t.date}_${t.vehicleNumber}_${t.weightKg}`)
+      existingTxs.map(t => `${t.date}_${t.vehicleNumber}_${t.weightKg}_${t.material || '40mm'}`)
     );
 
     const validRows = [];
@@ -305,14 +389,17 @@ app.post('/api/transactions/bulk', async (req, res) => {
 
     for (const load of loads) {
       const vNum = (load.vehicleNumber || '').trim().toUpperCase();
-      const key = `${load.date}_${vNum}_${load.weightKg}`;
+      const mat = normalizeMaterial(load.material || fallbackMat);
+      const key = `${load.date}_${vNum}_${load.weightKg}_${mat}`;
+
       if (existingSet.has(key)) {
         duplicateRows.push(load);
       } else {
-        const calc = calcTransaction(load.weightKg, settings);
+        const calc = calcTransaction(load.weightKg, settings, mat);
         validRows.push({
           date: load.date,
           vehicleNumber: vNum,
+          material: mat,
           weightKg: calc.weightKg,
           weightTons: calc.weightTons,
           customerTotalAmount: calc.customerTotalAmount,
@@ -346,13 +433,19 @@ app.post('/api/transactions/bulk', async (req, res) => {
   }
 });
 
-// Dashboard
+// Dashboard (Material-aware)
 app.get('/api/dashboard', async (req, res) => {
   try {
     const settings = await getSettings();
-    const allTxs = await prisma.transaction.findMany({
+    const matFilter = req.query.material || 'All';
+    const whereBase = buildWhereClause({ material: matFilter });
+
+    const allMatching = await prisma.transaction.findMany({
+      where: whereBase,
       orderBy: { date: 'asc' }
     });
+
+    const enrichedAll = allMatching.map(t => enrichTransaction(t, settings));
 
     const todayStr = getTodayISO();
     const weekStartStr = getWeekStartISO(todayStr);
@@ -360,24 +453,19 @@ app.get('/api/dashboard', async (req, res) => {
 
     const whereSelected = buildWhereClause(req.query);
     const selectedTxs = (req.query.from || req.query.to)
-      ? await prisma.transaction.findMany({ where: whereSelected })
-      : allTxs;
+      ? (await prisma.transaction.findMany({ where: whereSelected })).map(t => enrichTransaction(t, settings))
+      : enrichedAll;
 
-    const aggregateArr = (arr) => {
-      const totalKg = arr.reduce((acc, t) => acc + Number(t.weightKg || 0), 0);
-      return calcAggregate(totalKg, arr.length, settings);
-    };
+    const overallTotals = calcRowsAggregate(enrichedAll, settings, matFilter);
+    const selectedTotals = calcRowsAggregate(selectedTxs, settings, matFilter);
 
-    const overallTotals = aggregateArr(allTxs);
-    const selectedTotals = aggregateArr(selectedTxs);
+    const todayTxs = enrichedAll.filter(t => t.date === todayStr);
+    const weekTxs = enrichedAll.filter(t => t.date >= weekStartStr && t.date <= todayStr);
+    const monthTxs = enrichedAll.filter(t => t.date >= monthStartStr && t.date <= todayStr);
 
-    const todayTxs = allTxs.filter(t => t.date === todayStr);
-    const weekTxs = allTxs.filter(t => t.date >= weekStartStr && t.date <= todayStr);
-    const monthTxs = allTxs.filter(t => t.date >= monthStartStr && t.date <= todayStr);
-
-    const todayTotals = aggregateArr(todayTxs);
-    const weekTotals = aggregateArr(weekTxs);
-    const monthTotals = aggregateArr(monthTxs);
+    const todayTotals = calcRowsAggregate(todayTxs, settings, matFilter);
+    const weekTotals = calcRowsAggregate(weekTxs, settings, matFilter);
+    const monthTotals = calcRowsAggregate(monthTxs, settings, matFilter);
 
     // Build 14-day chart
     const chart = [];
@@ -385,21 +473,22 @@ app.get('/api/dashboard', async (req, res) => {
       const d = new Date();
       d.setUTCDate(d.getUTCDate() - i);
       const iso = d.toISOString().slice(0, 10);
-      const dayTxs = allTxs.filter(t => t.date === iso);
-      const dayKg = dayTxs.reduce((acc, t) => acc + Number(t.weightKg || 0), 0);
-      const dayTons = Number(toTons(dayKg).toNumber());
-      const dayProfit = Number(money(dayTons * settings.rkrProfitPerTon).toNumber());
+      const dayTxs = enrichedAll.filter(t => t.date === iso);
+      const dayTons = dayTxs.reduce((acc, t) => acc + Number(t.weightTons || 0), 0);
+      const dayProfit = dayTxs.reduce((acc, t) => acc + Number(t.rkrProfit || 0), 0);
 
       chart.push({
         date: iso,
-        tons: dayTons,
-        rkrProfit: dayProfit
+        tons: Number(dayTons.toFixed(3)),
+        rkrProfit: Number(dayProfit.toFixed(2))
       });
     }
 
     const rangeLabel = req.query.from && req.query.to
       ? `${req.query.from} to ${req.query.to}`
       : 'All Time';
+
+    const activeRateCard = matFilter !== 'All' ? getMaterialRates(settings, matFilter) : settings;
 
     res.json({
       data: {
@@ -411,8 +500,11 @@ app.get('/api/dashboard', async (req, res) => {
           month: monthTotals,
           overall: overallTotals
         },
-        rates: settings,
-        capacity: settings.capacity,
+        rates: activeRateCard,
+        materials: settings.materials,
+        capacity: matFilter !== 'All' && settings.materials[matFilter]
+          ? settings.materials[matFilter].capacity
+          : settings.capacity,
         chart
       }
     });
@@ -422,10 +514,11 @@ app.get('/api/dashboard', async (req, res) => {
   }
 });
 
-// Helper for Report queries
+// Helper for Report queries (Material-aware)
 async function handleReport(req, res) {
   try {
     const settings = await getSettings();
+    const matFilter = req.query.material || 'All';
     const where = buildWhereClause(req.query);
 
     const txs = await prisma.transaction.findMany({
@@ -433,32 +526,30 @@ async function handleReport(req, res) {
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }]
     });
 
-    const totalKg = txs.reduce((a, b) => a + Number(b.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, txs.length, settings);
+    const enrichedTxs = txs.map(t => enrichTransaction(t, settings));
+    const totals = calcRowsAggregate(enrichedTxs, settings, matFilter);
 
     // Daily breakdown for Date-wise report
     const dayMap = {};
-    for (const t of txs) {
+    for (const t of enrichedTxs) {
       if (!dayMap[t.date]) {
         dayMap[t.date] = {
           date: t.date,
           dayName: getDayName(t.date),
-          loadCount: 0,
-          totalWeightKg: 0,
+          items: []
         };
       }
-      dayMap[t.date].loadCount += 1;
-      dayMap[t.date].totalWeightKg += Number(t.weightKg || 0);
+      dayMap[t.date].items.push(t);
     }
 
     const days = Object.values(dayMap)
       .sort((a, b) => (req.query.sort === 'asc' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date)))
       .map(d => {
-        const dAgg = calcAggregate(d.totalWeightKg, d.loadCount, settings);
+        const dAgg = calcRowsAggregate(d.items, settings, matFilter);
         return {
           date: d.date,
           dayName: d.dayName,
-          loadCount: d.loadCount,
+          loadCount: dAgg.loadCount,
           totalWeightKg: dAgg.totalWeightKg,
           totalWeightTons: dAgg.totalWeightTons,
           customerTotalAmount: dAgg.customerTotalAmount,
@@ -466,8 +557,6 @@ async function handleReport(req, res) {
           rkrProfit: dAgg.rkrProfit
         };
       });
-
-    const enrichedTxs = txs.map(t => enrichTransaction(t, settings));
 
     res.json({
       data: {
@@ -488,32 +577,32 @@ app.get('/api/reports/weekly', handleReport);
 app.get('/api/reports/monthly', handleReport);
 app.get('/api/reports/overall', handleReport);
 
-// Vehicles Report
+// Vehicles Report (Material-aware)
 app.get('/api/reports/vehicles', async (req, res) => {
   try {
     const settings = await getSettings();
+    const matFilter = req.query.material || 'All';
     const where = buildWhereClause(req.query);
     const txs = await prisma.transaction.findMany({ where });
+    const enrichedTxs = txs.map(t => enrichTransaction(t, settings));
 
     const vMap = {};
-    for (const t of txs) {
+    for (const t of enrichedTxs) {
       const v = t.vehicleNumber;
       if (!vMap[v]) {
         vMap[v] = {
           vehicleNumber: v,
-          loadCount: 0,
-          totalWeightKg: 0,
+          items: []
         };
       }
-      vMap[v].loadCount += 1;
-      vMap[v].totalWeightKg += Number(t.weightKg || 0);
+      vMap[v].items.push(t);
     }
 
     const vehicles = Object.values(vMap).map(v => {
-      const agg = calcAggregate(v.totalWeightKg, v.loadCount, settings);
+      const agg = calcRowsAggregate(v.items, settings, matFilter);
       return {
         vehicleNumber: v.vehicleNumber,
-        loadCount: v.loadCount,
+        loadCount: agg.loadCount,
         totalWeightKg: agg.totalWeightKg,
         totalWeightTons: agg.totalWeightTons,
         customerTotalAmount: agg.customerTotalAmount,
@@ -533,10 +622,11 @@ app.get('/api/reports/vehicles', async (req, res) => {
   }
 });
 
-// EXPORT ENDPOINT: 14 Columns with Full Financial Details
+// EXPORT ENDPOINT: Material + 14 Columns with Full Financial Details
 app.get('/api/export/excel', async (req, res) => {
   try {
     const settings = await getSettings();
+    const matFilter = req.query.material || 'All';
     const where = buildWhereClause(req.query);
 
     const txs = await prisma.transaction.findMany({
@@ -545,32 +635,29 @@ app.get('/api/export/excel', async (req, res) => {
     });
 
     const enrichedRows = txs.map(t => enrichTransaction(t, settings));
-    const totalKg = txs.reduce((a, b) => a + Number(b.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, txs.length, settings);
+    const totals = calcRowsAggregate(enrichedRows, settings, matFilter);
 
     // Group daily for Date-wise Profit sheet
     const dayMap = {};
-    for (const t of txs) {
+    for (const t of enrichedRows) {
       if (!dayMap[t.date]) {
         dayMap[t.date] = {
           date: t.date,
           dayName: getDayName(t.date),
-          loadCount: 0,
-          totalWeightKg: 0,
+          items: []
         };
       }
-      dayMap[t.date].loadCount += 1;
-      dayMap[t.date].totalWeightKg += Number(t.weightKg || 0);
+      dayMap[t.date].items.push(t);
     }
 
     const days = Object.values(dayMap)
       .sort((a, b) => b.date.localeCompare(a.date))
       .map(d => {
-        const dAgg = calcAggregate(d.totalWeightKg, d.loadCount, settings);
+        const dAgg = calcRowsAggregate(d.items, settings, matFilter);
         return {
           date: d.date,
           dayName: d.dayName,
-          loadCount: d.loadCount,
+          loadCount: dAgg.loadCount,
           totalWeightKg: dAgg.totalWeightKg,
           totalWeightTons: dAgg.totalWeightTons,
           customerTotalAmount: dAgg.customerTotalAmount,
@@ -583,11 +670,13 @@ app.get('/api/export/excel', async (req, res) => {
       ? `${req.query.from} to ${req.query.to}`
       : 'All Time';
 
+    const matSuffix = matFilter !== 'All' ? `-${matFilter}` : '';
+
     // If CSV explicitly requested
     if (req.query.format === 'csv') {
       const csv = buildCsv(enrichedRows, settings);
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="RKR-Transactions.csv"');
+      res.setHeader('Content-Disposition', `attachment; filename="RKR-Transactions${matSuffix}.csv"`);
       return res.send(csv);
     }
 
@@ -597,11 +686,12 @@ app.get('/api/export/excel', async (req, res) => {
       days,
       totals,
       settings,
-      subtitle: `${rangeLabel}  |  ${enrichedRows.length} loads`
+      materialFilter: matFilter,
+      subtitle: `${rangeLabel}  |  ${enrichedRows.length} loads (${matFilter})`
     });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="RKR-Transactions.xlsx"');
+    res.setHeader('Content-Disposition', `attachment; filename="RKR-Transactions${matSuffix}.xlsx"`);
     res.setHeader('Content-Length', buffer.length);
     res.end(Buffer.from(buffer));
   } catch (err) {
@@ -610,10 +700,16 @@ app.get('/api/export/excel', async (req, res) => {
   }
 });
 
-// Weekly Invoices Endpoints
+// Weekly Invoices Endpoints (Material-aware)
 app.get('/api/invoices', async (req, res) => {
   try {
+    const matFilter = req.query.material;
+    let where = {};
+    if (matFilter && matFilter !== 'All') {
+      where.material = matFilter;
+    }
     const invoices = await prisma.invoice.findMany({
+      where,
       orderBy: { generatedAt: 'desc' }
     });
     res.json({ data: invoices, total: invoices.length });
@@ -626,24 +722,31 @@ app.get('/api/invoices/preview', async (req, res) => {
   try {
     const settings = await getSettings();
     const weekOf = req.query.weekOf || getTodayISO();
+    const matFilter = req.query.material || 'All';
     const start = getWeekStartISO(weekOf);
     const end = getWeekEndISO(weekOf);
 
+    const where = { date: { gte: start, lte: end } };
+    if (matFilter && matFilter !== 'All') {
+      where.material = normalizeMaterial(matFilter);
+    }
+
     const txs = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end } },
+      where,
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }]
     });
 
-    const totalKg = txs.reduce((a, b) => a + Number(b.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, txs.length, settings);
+    const enriched = txs.map(t => enrichTransaction(t, settings));
+    const totals = calcRowsAggregate(enriched, settings, matFilter);
 
     res.json({
       data: {
         weekStart: start,
         weekEnd: end,
+        material: matFilter,
         totals,
-        itemCount: txs.length,
-        items: txs.map(t => enrichTransaction(t, settings))
+        itemCount: enriched.length,
+        items: enriched
       }
     });
   } catch (err) {
@@ -653,29 +756,38 @@ app.get('/api/invoices/preview', async (req, res) => {
 
 app.post('/api/invoices/generate', async (req, res) => {
   try {
-    const { weekOf } = req.body;
+    const { weekOf, material, regenerate } = req.body;
+    const mat = material && material !== 'All' ? normalizeMaterial(material) : 'All';
     const settings = await getSettings();
     const start = getWeekStartISO(weekOf || getTodayISO());
     const end = getWeekEndISO(weekOf || getTodayISO());
 
+    const whereExisting = { weekOf: start };
+    if (mat !== 'All') {
+      whereExisting.material = mat;
+    }
+
     const existing = await prisma.invoice.findFirst({
-      where: { weekOf: start }
+      where: whereExisting
     });
 
-    if (existing && !req.body.regenerate) {
+    if (existing && !regenerate) {
       return res.status(409).json({
-        error: { message: `Invoice for week of ${start} already exists.` },
+        error: { message: `Invoice for week of ${start} (${mat}) already exists.` },
         details: { invoice: existing }
       });
     }
 
-    const txs = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end } }
-    });
+    const whereTxs = { date: { gte: start, lte: end } };
+    if (mat !== 'All') {
+      whereTxs.material = mat;
+    }
+
+    const txs = await prisma.transaction.findMany({ where: whereTxs });
 
     if (txs.length === 0) {
       return res.status(400).json({
-        error: { message: `No loads found for week ${start} to ${end}.` }
+        error: { message: `No ${mat === 'All' ? '' : mat + ' '}loads found for week ${start} to ${end}.` }
       });
     }
 
@@ -686,13 +798,14 @@ app.post('/api/invoices/generate', async (req, res) => {
       invoice = await prisma.invoice.create({
         data: {
           weekOf: start,
-          path: `RKR-${start}.xlsx`
+          material: mat,
+          path: `RKR-${start}-${mat}.xlsx`
         }
       });
     }
 
     res.json({
-      message: 'Weekly invoice generated successfully.',
+      message: `Weekly invoice generated successfully for ${mat}.`,
       data: invoice
     });
   } catch (err) {
@@ -712,22 +825,29 @@ app.get('/api/invoices/:id', async (req, res) => {
 
     const start = invoice.weekOf;
     const end = getWeekEndISO(start);
+    const mat = invoice.material || 'All';
+
+    const where = { date: { gte: start, lte: end } };
+    if (mat !== 'All') {
+      where.material = mat;
+    }
 
     const txs = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end } },
+      where,
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }]
     });
 
-    const totalKg = txs.reduce((a, b) => a + Number(b.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, txs.length, settings);
+    const enriched = txs.map(t => enrichTransaction(t, settings));
+    const totals = calcRowsAggregate(enriched, settings, mat);
 
     res.json({
       data: {
         id: invoice.id,
-        invoiceNumber: `${settings.invoicePrefix}${start}`,
+        invoiceNumber: `${settings.invoicePrefix}${start}${mat !== 'All' ? '-' + mat : ''}`,
         weekStart: start,
         weekEnd: end,
-        totalLoads: txs.length,
+        material: mat,
+        totalLoads: enriched.length,
         totalWeightKg: totals.totalWeightKg,
         totalWeightTons: totals.totalWeightTons,
         customerRatePerTon: totals.customerRatePerTon,
@@ -742,7 +862,7 @@ app.get('/api/invoices/:id', async (req, res) => {
         companyTotalAmount: totals.companyTotalAmount,
         rkrProfitPerTon: totals.rkrProfitPerTon,
         rkrProfit: totals.rkrProfit,
-        items: txs.map(t => enrichTransaction(t, settings))
+        items: enriched
       }
     });
   } catch (err) {
@@ -762,24 +882,30 @@ app.get('/api/invoices/:id/excel', async (req, res) => {
 
     const start = invoice.weekOf;
     const end = getWeekEndISO(start);
+    const mat = invoice.material || 'All';
+
+    const where = { date: { gte: start, lte: end } };
+    if (mat !== 'All') {
+      where.material = mat;
+    }
 
     const txs = await prisma.transaction.findMany({
-      where: { date: { gte: start, lte: end } },
+      where,
       orderBy: [{ date: 'asc' }, { createdAt: 'asc' }]
     });
 
     const enrichedRows = txs.map(t => enrichTransaction(t, settings));
-    const totalKg = txs.reduce((a, b) => a + Number(b.weightKg || 0), 0);
-    const totals = calcAggregate(totalKg, txs.length, settings);
+    const totals = calcRowsAggregate(enrichedRows, settings, mat);
 
     const buffer = await buildWorkbook({
       rows: enrichedRows,
       totals,
       settings,
-      subtitle: `Invoice ${settings.invoicePrefix}${start}  |  ${start} to ${end}`
+      materialFilter: mat,
+      subtitle: `Invoice ${settings.invoicePrefix}${start} (${mat})  |  ${start} to ${end}`
     });
 
-    const filename = `${settings.invoicePrefix}${start}.xlsx`;
+    const filename = `${settings.invoicePrefix}${start}${mat !== 'All' ? '-' + mat : ''}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length);

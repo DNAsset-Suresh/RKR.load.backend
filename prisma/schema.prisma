@@ -12,6 +12,7 @@ model Transaction {
   id                  String   @id @default(cuid())
   date                String
   vehicleNumber       String
+  material            String   @default("40mm")
   weightKg            Float
   weightTons          Float
   customerTotalAmount Float
@@ -27,8 +28,9 @@ model Setting {
 }
 
 model Invoice {
-  id         String   @id @default(cuid())
-  weekOf     String
-  path       String
+  id          String   @id @default(cuid())
+  weekOf      String
+  material    String?  @default("All")
+  path        String
   generatedAt DateTime @default(now())
 }

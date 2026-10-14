@@ -1,5 +1,5 @@
 const ExcelJS = require('exceljs');
-const { calcAggregate } = require('./calc');
+const { calcRowsAggregate } = require('./calc');
 
 const NAVY = 'FF0A1B3D';
 const GOLD = 'FFC9A24B';
@@ -13,6 +13,7 @@ const TONFMT = '#,##0.000';
 const COLUMNS = [
   { header: 'Date', key: 'date', width: 13 },
   { header: 'Vehicle Number', key: 'vehicleNumber', width: 20 },
+  { header: 'Material', key: 'material', width: 13 },
   { header: 'Weight KG', key: 'weightKg', width: 14, fmt: KGFMT },
   { header: 'Weight Tons', key: 'weightTons', width: 14, fmt: TONFMT },
   { header: 'Customer Rate/Ton', key: 'customerRatePerTon', width: 17, fmt: INR },
@@ -30,7 +31,7 @@ const COLUMNS = [
 function styleHeader(row) {
   row.height = 26;
   row.eachCell(function (cell, col) {
-    const isRkr = col >= 13;
+    const isRkr = col >= 14;
     cell.font = { bold: true, size: 10, color: { argb: isRkr ? NAVY : 'FFFFFFFF' } };
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isRkr ? GOLD : NAVY } };
     cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
@@ -40,7 +41,7 @@ function styleHeader(row) {
 function titleBlock(sheet, settings, title, subtitle, span) {
   sheet.mergeCells(1, 1, 1, span);
   const t = sheet.getCell('A1');
-  t.value = (settings.businessName || 'RKR Enterprises') + '  -  ' + title;
+  t.value = (settings.businessName || 'RKR ENTERPRISES') + '  -  ' + title;
   t.font = { bold: true, size: 15, color: { argb: NAVY } };
 
   sheet.mergeCells(2, 1, 2, span);
@@ -49,7 +50,7 @@ function titleBlock(sheet, settings, title, subtitle, span) {
   s.font = { italic: true, size: 10, color: { argb: 'FF5B6478' } };
 }
 
-/** Transaction sheet with all 14 spec columns plus a TOTAL row. */
+/** Transaction sheet with Material and all 14 spec columns plus a TOTAL row. */
 function addTransactionSheet(wb, rows, settings, meta) {
   const sheet = wb.addWorksheet('Transactions', {
     views: [{ state: 'frozen', ySplit: 4 }],
@@ -66,35 +67,43 @@ function addTransactionSheet(wb, rows, settings, meta) {
     const row = sheet.addRow(COLUMNS.map(function (c) {
       if (c.key === 'date') return r.date;
       if (c.key === 'vehicleNumber') return r.vehicleNumber;
+      if (c.key === 'material') return r.material || '40mm';
       return Number(r[c.key] || 0);
     }));
 
     COLUMNS.forEach(function (c, i) {
       if (c.fmt) row.getCell(i + 1).numFmt = c.fmt;
-      if (i >= 12) {
+      if (i >= 13) {
         row.getCell(i + 1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GOLD_LIGHT } };
       }
     });
   });
 
-  // Totals recomputed from summed KG
-  const totalKg = rows.reduce(function (a, r) { return a + Number(r.weightKg || 0); }, 0);
-  const t = calcAggregate(totalKg, rows.length, settings);
+  // Calculate totals from rows
+  const t = meta.totals || calcRowsAggregate(rows, settings, meta.materialFilter);
 
   sheet.addRow([]);
   const total = sheet.addRow([
-    'TOTAL', rows.length + ' loads',
-    Number(t.totalWeightKg), Number(t.totalWeightTons),
-    Number(t.customerRatePerTon), Number(t.customerGstAmount),
-    Number(t.customerBaseAmount), Number(t.customerTotalAmount),
-    Number(t.companyRatePerTon), Number(t.companyGstAmount),
-    Number(t.companyBaseAmount), Number(t.companyTotalAmount),
-    Number(t.rkrProfitPerTon), Number(t.rkrProfit),
+    'TOTAL',
+    rows.length + ' loads',
+    meta.materialFilter || 'All',
+    Number(t.totalWeightKg),
+    Number(t.totalWeightTons),
+    Number(t.customerRatePerTon),
+    Number(t.customerGstAmount),
+    Number(t.customerBaseAmount),
+    Number(t.customerTotalAmount),
+    Number(t.companyRatePerTon),
+    Number(t.companyGstAmount),
+    Number(t.companyBaseAmount),
+    Number(t.companyTotalAmount),
+    Number(t.rkrProfitPerTon),
+    Number(t.rkrProfit),
   ]);
 
   total.eachCell(function (cell, col) {
     cell.font = { bold: true, color: { argb: NAVY } };
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: col >= 13 ? GOLD_LIGHT : SOFT } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: col >= 14 ? GOLD_LIGHT : SOFT } };
     const c = COLUMNS[col - 1];
     if (c && c.fmt) cell.numFmt = c.fmt;
   });
@@ -169,6 +178,7 @@ function addSummarySheet(wb, settings, meta) {
   if (!t) return sheet;
 
   const lines = [
+    ['Material Segment', meta.materialFilter || 'All Materials', '@'],
     ['Total Loads', t.loadCount, '#,##0'],
     ['Total Weight KG', t.totalWeightKg, KGFMT],
     ['Total Weight Tons', t.totalWeightTons, TONFMT],
@@ -191,7 +201,7 @@ function addSummarySheet(wb, settings, meta) {
     if (!l[0]) { sheet.addRow([]); return; }
     const row = sheet.addRow([l[0], l[1]]);
     row.getCell(1).font = { bold: l[0] === 'RKR PROFIT', color: { argb: NAVY } };
-    row.getCell(2).numFmt = l[2];
+    if (l[2]) row.getCell(2).numFmt = l[2];
     if (l[0] === 'RKR PROFIT') {
       row.getCell(2).font = { bold: true, size: 13, color: { argb: NAVY } };
       row.getCell(2).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GOLD_LIGHT } };
@@ -199,7 +209,7 @@ function addSummarySheet(wb, settings, meta) {
   });
 
   sheet.addRow([]);
-  const note = sheet.addRow(['Rule:  KG / 1000 = TONS,  then TONS x rate. Never per vehicle.']);
+  const note = sheet.addRow(['Rule:  KG / 1000 = TONS,  then TONS x rate. Material: 40mm or Dust.']);
   note.getCell(1).font = { italic: true, size: 10, color: { argb: 'FF5B6478' } };
   return sheet;
 }
@@ -207,7 +217,7 @@ function addSummarySheet(wb, settings, meta) {
 /** Build full workbook buffer */
 async function buildWorkbook(options) {
   const wb = new ExcelJS.Workbook();
-  wb.creator = options.settings.businessName || 'RKR Enterprises';
+  wb.creator = options.settings.businessName || 'RKR ENTERPRISES';
   wb.created = new Date();
 
   addSummarySheet(wb, options.settings, options);
@@ -219,7 +229,7 @@ async function buildWorkbook(options) {
   return await wb.xlsx.writeBuffer();
 }
 
-/** CSV generator containing all 14 columns */
+/** CSV generator containing Material and all 14 columns */
 function buildCsv(rows, settings) {
   const headers = COLUMNS.map(c => c.header).join(',');
   let csv = headers + '\n';
